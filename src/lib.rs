@@ -17,7 +17,7 @@ pub use bitlocker::{
 };
 pub use cli::{
     BitlockerArgs, Cli, Command, ConnectorKind, EnvarsArgs, GlobalArgs, LogLevel, MemdumpArgs,
-    PsListArgs, TriageArgs,
+    OsKind, PsListArgs, TriageArgs,
 };
 pub use connector::{Connector, ConnectorOptions};
 

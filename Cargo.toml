@@ -12,6 +12,7 @@ memflow = { git = "https://github.com/forensicxlab/memflow", branch = "main" }
 memflow-rawmem = { git = "https://github.com/forensicxlab/memflow-rawmem", branch = "main" }
 memflow-win32 = { git = "https://github.com/forensicxlab/memflow-win32", branch = "main" }
 memflow-pcileech = { git = "https://github.com/memflow/memflow-pcileech", branch = "main" }
+memflow-linux = { git = "https://github.com/forensicxlab/memflow-linux", branch = "master", default-features = false }
 
 hex = "0.4"
 rayon = "1.8"

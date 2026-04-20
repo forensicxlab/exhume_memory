@@ -6,11 +6,42 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use memflow::mem::phys_mem::PhysicalMemory;
 use memflow::prelude::v1::*;
+use memflow_linux::LinuxKernel;
 use memflow_win32::prelude::v1::*;
 use serde::Serialize;
 
 use crate::bitlocker::{BitlockerScanReport, BitlockerScanRequest, scan_bitlocker};
+use crate::cli::OsKind;
 use crate::connector::{Connector, ConnectorOptions};
+
+/// Dispatches to Win32Kernel or LinuxKernel based on `$os_kind`, binding the result to `$os`.
+/// The `$body` block must evaluate to `Result<_>` and is type-checked independently per arm.
+macro_rules! with_os {
+    ($connector:expr, $os_kind:expr, $linux_profile:expr, $os:ident, $body:expr) => {
+        match $os_kind {
+            OsKind::Windows => {
+                let mut $os = Win32Kernel::builder($connector)
+                    .build_default_caches()
+                    .build()
+                    .context("failed to initialize win32 OS layer")?;
+                $body
+            }
+            OsKind::Linux => {
+                let __builder = LinuxKernel::builder($connector);
+                let __builder = if let Some(__p) = ($linux_profile).as_ref() {
+                    __builder.profile(__p)
+                } else {
+                    __builder
+                };
+                let mut $os = __builder
+                    .build_default_caches()
+                    .build()
+                    .context("failed to initialize linux OS layer")?;
+                $body
+            }
+        }
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct PsListRequest {
@@ -134,158 +165,170 @@ impl MemoryService {
     pub fn probe(&self, request: &PsListRequest) -> Result<ProbeReport> {
         let connector = self.open_connector()?;
         let max_address = connector.metadata().max_address.to_umem();
-        let mut os = Win32Kernel::builder(connector)
-            .build_default_caches()
-            .build()
-            .context("failed to initialize win32 OS layer")?;
+        with_os!(
+            connector,
+            self.connector_options.os_kind,
+            self.connector_options.linux_profile,
+            os,
+            {
+                let kernel_last = os.phys_view().metadata().max_address.to_umem();
+                let physical_memory_end = max_address.max(kernel_last).saturating_add(1);
+                let processes = os
+                    .process_info_list()
+                    .context("unable to read process list from target")?
+                    .into_iter()
+                    .take(request.limit)
+                    .map(|p| ProcessRecord {
+                        pid: p.pid,
+                        sys_arch: p.sys_arch.to_string(),
+                        proc_arch: p.proc_arch.to_string(),
+                        name: p.name.to_string(),
+                    })
+                    .collect();
 
-        let kernel_last = os.phys_view().metadata().max_address.to_umem();
-        let physical_memory_end = max_address.max(kernel_last).saturating_add(1);
-        let processes = os
-            .process_info_list()
-            .context("unable to read process list from target")?
-            .into_iter()
-            .take(request.limit)
-            .map(|p| ProcessRecord {
-                pid: p.pid,
-                sys_arch: p.sys_arch.to_string(),
-                proc_arch: p.proc_arch.to_string(),
-                name: p.name.to_string(),
-            })
-            .collect();
-
-        Ok(ProbeReport {
-            max_address,
-            physical_memory_end,
-            processes,
-        })
+                Ok(ProbeReport {
+                    max_address,
+                    physical_memory_end,
+                    processes,
+                })
+            }
+        )
     }
 
     pub fn pslist(&self, request: &PsListRequest) -> Result<PsListReport> {
         let connector = self.open_connector()?;
-        let mut os = Win32Kernel::builder(connector)
-            .build_default_caches()
-            .build()
-            .context("failed to initialize win32 OS layer")?;
+        with_os!(
+            connector,
+            self.connector_options.os_kind,
+            self.connector_options.linux_profile,
+            os,
+            {
+                let processes = os
+                    .process_info_list()
+                    .context("unable to read process list from target")?
+                    .into_iter()
+                    .take(request.limit)
+                    .map(|p| ProcessRecord {
+                        pid: p.pid,
+                        sys_arch: p.sys_arch.to_string(),
+                        proc_arch: p.proc_arch.to_string(),
+                        name: p.name.to_string(),
+                    })
+                    .collect();
 
-        let processes = os
-            .process_info_list()
-            .context("unable to read process list from target")?
-            .into_iter()
-            .take(request.limit)
-            .map(|p| ProcessRecord {
-                pid: p.pid,
-                sys_arch: p.sys_arch.to_string(),
-                proc_arch: p.proc_arch.to_string(),
-                name: p.name.to_string(),
-            })
-            .collect();
-
-        Ok(PsListReport { processes })
+                Ok(PsListReport { processes })
+            }
+        )
     }
 
     pub fn triage(&self, request: &TriageRequest) -> Result<TriageReport> {
         let connector = self.open_connector()?;
-        let mut os = Win32Kernel::builder(connector)
-            .build_default_caches()
-            .build()
-            .context("failed to initialize win32 OS layer")?;
+        with_os!(
+            connector,
+            self.connector_options.os_kind,
+            self.connector_options.linux_profile,
+            os,
+            {
+                let process_list = os
+                    .process_info_list()
+                    .context("unable to read process list from target")?;
 
-        let process_list = os
-            .process_info_list()
-            .context("unable to read process list from target")?;
+                let processes = process_list
+                    .iter()
+                    .take(request.limit)
+                    .map(|p| ProcessRecord {
+                        pid: p.pid,
+                        sys_arch: p.sys_arch.to_string(),
+                        proc_arch: p.proc_arch.to_string(),
+                        name: p.name.to_string(),
+                    })
+                    .collect();
 
-        let processes = process_list
-            .iter()
-            .take(request.limit)
-            .map(|p| ProcessRecord {
-                pid: p.pid,
-                sys_arch: p.sys_arch.to_string(),
-                proc_arch: p.proc_arch.to_string(),
-                name: p.name.to_string(),
-            })
-            .collect();
+                let selected_process = if let Some(pid) = request.pid {
+                    let proc_info = process_list
+                        .into_iter()
+                        .find(|p| p.pid == pid)
+                        .with_context(|| format!("process not found in list: pid={pid}"))?;
+                    let resolved_name = proc_info.name.clone();
+                    let mut process = os
+                        .into_process_by_info(proc_info)
+                        .context("unable to open selected process")?;
+                    let modules = process
+                        .module_list()
+                        .context("unable to read selected process module list")?
+                        .into_iter()
+                        .take(request.limit)
+                        .map(|m| ModuleRecord {
+                            base: m.base.to_umem(),
+                            name: m.name.to_string(),
+                            path: m.path.to_string(),
+                        })
+                        .collect();
 
-        let selected_process = if let Some(pid) = request.pid {
-            let proc_info = process_list
-                .into_iter()
-                .find(|p| p.pid == pid)
-                .with_context(|| format!("process not found in list: pid={pid}"))?;
-            let resolved_name = proc_info.name.clone();
-            let mut process = os
-                .into_process_by_info(proc_info)
-                .context("unable to open selected process")?;
-            let modules = process
-                .module_list()
-                .context("unable to read selected process module list")?
-                .into_iter()
-                .take(request.limit)
-                .map(|m| ModuleRecord {
-                    base: m.base.to_umem(),
-                    name: m.name.to_string(),
-                    path: m.path.to_string(),
+                    Some(ProcessTriage {
+                        pid,
+                        name: resolved_name.to_string(),
+                        modules,
+                    })
+                } else {
+                    None
+                };
+
+                Ok(TriageReport {
+                    processes,
+                    selected_process,
                 })
-                .collect();
-
-            Some(ProcessTriage {
-                pid,
-                name: resolved_name.to_string(),
-                modules,
-            })
-        } else {
-            None
-        };
-
-        Ok(TriageReport {
-            processes,
-            selected_process,
-        })
+            }
+        )
     }
 
     pub fn envars(&self, request: &EnvarsRequest) -> Result<EnvarsReport> {
         let connector = self.open_connector()?;
-        let mut os = Win32Kernel::builder(connector)
-            .build_default_caches()
-            .build()
-            .context("failed to initialize win32 OS layer")?;
+        with_os!(
+            connector,
+            self.connector_options.os_kind,
+            self.connector_options.linux_profile,
+            os,
+            {
+                let proc_info = os
+                    .process_info_by_pid(request.pid)
+                    .with_context(|| format!("process not found in list: pid={}", request.pid))?;
+                let process_name = proc_info.name.to_string();
+                let mut process = os
+                    .into_process_by_info(proc_info)
+                    .context("unable to open selected process")?;
 
-        let proc_info = os
-            .process_info_by_pid(request.pid)
-            .with_context(|| format!("process not found in list: pid={}", request.pid))?;
-        let process_name = proc_info.name.to_string();
-        let mut process = os
-            .into_process_by_info(proc_info)
-            .context("unable to open selected process")?;
+                let variables = if let Some(name) = request.name.as_deref() {
+                    let variable = process
+                        .envar_by_name(name)
+                        .with_context(|| format!("environment variable not found: {name}"))?;
+                    vec![EnvarRecord {
+                        name: variable.name.to_string(),
+                        value: variable.value.to_string(),
+                        address: variable.address.to_umem(),
+                        arch: variable.arch.to_string(),
+                    }]
+                } else {
+                    process
+                        .envar_list()
+                        .context("unable to retrieve environment variables list")?
+                        .into_iter()
+                        .map(|variable| EnvarRecord {
+                            name: variable.name.to_string(),
+                            value: variable.value.to_string(),
+                            address: variable.address.to_umem(),
+                            arch: variable.arch.to_string(),
+                        })
+                        .collect()
+                };
 
-        let variables = if let Some(name) = request.name.as_deref() {
-            let variable = process
-                .envar_by_name(name)
-                .with_context(|| format!("environment variable not found: {name}"))?;
-            vec![EnvarRecord {
-                name: variable.name.to_string(),
-                value: variable.value.to_string(),
-                address: variable.address.to_umem(),
-                arch: variable.arch.to_string(),
-            }]
-        } else {
-            process
-                .envar_list()
-                .context("unable to retrieve environment variables list")?
-                .into_iter()
-                .map(|variable| EnvarRecord {
-                    name: variable.name.to_string(),
-                    value: variable.value.to_string(),
-                    address: variable.address.to_umem(),
-                    arch: variable.arch.to_string(),
+                Ok(EnvarsReport {
+                    pid: request.pid,
+                    process_name,
+                    variables,
                 })
-                .collect()
-        };
-
-        Ok(EnvarsReport {
-            pid: request.pid,
-            process_name,
-            variables,
-        })
+            }
+        )
     }
 
     pub fn memdump(&self, request: &MemdumpRequest) -> Result<MemdumpReport> {
@@ -363,6 +406,9 @@ impl MemoryService {
     }
 
     pub fn scan_bitlocker(&self, request: &BitlockerScanRequest) -> Result<BitlockerScanReport> {
+        if self.connector_options.os_kind == OsKind::Linux {
+            anyhow::bail!("BitLocker scanning is not supported for Linux targets");
+        }
         scan_bitlocker(&self.connector_options, request)
     }
 }

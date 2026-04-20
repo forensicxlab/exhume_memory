@@ -4,6 +4,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::connector::ConnectorOptions;
 
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+pub enum OsKind {
+    Windows,
+    Linux,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "exhume_memory")]
 #[command(
@@ -29,6 +35,15 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_enum, default_value_t = ConnectorKind::Pcileech)]
     pub connector_type: ConnectorKind,
 
+    /// OS type to target.
+    #[arg(long, global = true, value_enum, default_value_t = OsKind::Windows)]
+    pub os: OsKind,
+
+    /// Path to the Linux kernel defs profile (vmlinux.toml). Required when --os=linux unless
+    /// MEMFLOW_LINUX_PROFILE is set or a profile is adjacent to the memory image.
+    #[arg(long, global = true)]
+    pub linux_profile: Option<PathBuf>,
+
     /// Logging verbosity.
     #[arg(long, global = true, value_enum, default_value_t = LogLevel::Info)]
     pub log_level: LogLevel,
@@ -43,6 +58,8 @@ impl GlobalArgs {
         ConnectorOptions {
             connector: self.connector.clone(),
             kind: self.connector_type,
+            os_kind: self.os,
+            linux_profile: self.linux_profile.clone(),
         }
     }
 }

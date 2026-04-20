@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
@@ -5,12 +6,14 @@ use memflow::mem::phys_mem::{PhysicalMemory, PhysicalMemoryMetadata};
 use memflow::prelude::v1::*;
 use memflow_win32::prelude::v1::*;
 
-use crate::cli::ConnectorKind;
+use crate::cli::{ConnectorKind, OsKind};
 
 #[derive(Debug, Clone)]
 pub struct ConnectorOptions {
     pub connector: String,
     pub kind: ConnectorKind,
+    pub os_kind: OsKind,
+    pub linux_profile: Option<PathBuf>,
 }
 
 #[derive(Clone)]
