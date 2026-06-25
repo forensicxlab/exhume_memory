@@ -1,6 +1,7 @@
-# exhume_memory
+# Exhume Memory
 
-`exhume_memory` is a specialized memory forensics tool for acquisition and analysis, built on the `memflow` framework. It supports high-speed BitLocker key extraction, process listing, and triage.
+`exhume_memory` is the specialized memory forensics module of the toolsuite for acquisition and analysis, built on the `memflow` framework. This module is currently unstable and subject to changes.
+
 
 ## Features
 
@@ -11,7 +12,7 @@
 
 ## Prerequisites
 
-### LeechCore (for pcileech connector)
+### Optional - LeechCore (for pcileech connector)
 
 To use `exhume_memory` with an FPGA device (pcileech), you need the LeechCore runtime libraries.
 
@@ -108,7 +109,3 @@ cargo run --manifest-path members/exhume_memory/Cargo.toml -- \
   --connector /Volumes/Forensics/suspect_memdum.raw \
   bitlocker
 ```
-
-## License
-
-This project is licensed under the MIT License.
