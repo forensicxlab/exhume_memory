@@ -6,8 +6,8 @@
 ## Features
 
 - **BitLocker Key Recovery**: Fast extraction of FVEK/VMK keys using pool tag and signature scanning.
-- **Parallel Scanning**: Multi-threaded physical memory analysis for raw memory dumps.
-- **Multiple Connectors**: Supports both LeechCore (FPGA/USB hardware) and raw memory images.
+- **Parallel Scanning**: Multi-threaded physical memory analysis for raw memory dumps and KVM sources.
+- **Multiple Connectors**: Supports LeechCore (FPGA/USB hardware), KVM, and raw memory images.
 - **Process Listing and Triage**: Enumerate processes and inspect modules with architecture detection.
 
 ## Prerequisites

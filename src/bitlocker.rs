@@ -114,10 +114,10 @@ pub fn scan_bitlocker_with_callbacks(
     );
 
     let mut hits = match connector_options.kind {
-        ConnectorKind::Kvm | ConnectorKind::Pcileech => {
+        ConnectorKind::Pcileech => {
             scan_sequential(connector, start, chunk_count, request.chunk_size, callbacks)
         }
-        ConnectorKind::Rawmem => scan_parallel(
+        ConnectorKind::Kvm | ConnectorKind::Rawmem => scan_parallel(
             connector_options,
             start,
             chunk_count,
@@ -148,16 +148,12 @@ fn scan_sequential(
 
     for i in 0..chunk_count {
         let chunk_base = start + i * chunk_size as u64;
-        let mut buf = vec![0u8; chunk_size + 1024];
-        if connector
-            .phys_view()
-            .read_raw_into(Address::from(chunk_base), &mut buf)
-            .is_ok()
-        {
-            let chunk_hits = collect_hits(&buf, chunk_base);
-            emit_hits(callbacks, &chunk_hits);
-            hits.extend(chunk_hits);
-        }
+        hits.extend(scan_chunk(
+            &mut connector,
+            chunk_base,
+            chunk_size,
+            callbacks,
+        ));
 
         let scanned = i + 1;
         maybe_emit_progress(callbacks, scanned, chunk_count);
@@ -180,20 +176,27 @@ fn scan_parallel(
     let callbacks = callbacks.clone();
     let per_chunk = (0..chunk_count)
         .into_par_iter()
-        .map(|i| {
-            let result = scan_chunk(
-                connector_options,
-                start + i * chunk_size as u64,
-                chunk_size,
-                &callbacks,
-            );
-            let scanned = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            maybe_emit_progress(&callbacks, scanned, chunk_count);
-            if scanned == 1 || scanned % 256 == 0 || scanned == chunk_count {
-                log::info!("bitlocker scan progress: {scanned}/{chunk_count} chunks");
-            }
-            result
-        })
+        .map_init(
+            || connector_options.open().map_err(|e| e.to_string()),
+            |connector, i| {
+                let result = match connector.as_mut() {
+                    Ok(connector) => Ok(scan_chunk(
+                        connector,
+                        start + i * chunk_size as u64,
+                        chunk_size,
+                        &callbacks,
+                    )),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                };
+
+                let scanned = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                maybe_emit_progress(&callbacks, scanned, chunk_count);
+                if scanned == 1 || scanned % 256 == 0 || scanned == chunk_count {
+                    log::info!("bitlocker scan progress: {scanned}/{chunk_count} chunks");
+                }
+                result
+            },
+        )
         .collect::<Vec<_>>();
 
     let mut hits = Vec::new();
@@ -205,12 +208,11 @@ fn scan_parallel(
 }
 
 fn scan_chunk(
-    connector_options: &ConnectorOptions,
+    connector: &mut Connector,
     chunk_base: u64,
     chunk_size: usize,
     callbacks: &BitlockerScanCallbacks,
-) -> Result<Vec<BitlockerHit>> {
-    let mut connector = connector_options.open()?;
+) -> Vec<BitlockerHit> {
     let mut buf = vec![0u8; chunk_size + 1024];
 
     if connector
@@ -220,10 +222,10 @@ fn scan_chunk(
     {
         let hits = collect_hits(&buf, chunk_base);
         emit_hits(callbacks, &hits);
-        return Ok(hits);
+        return hits;
     }
 
-    Ok(Vec::new())
+    Vec::new()
 }
 
 fn collect_hits(buf: &[u8], base_addr: u64) -> Vec<BitlockerHit> {
