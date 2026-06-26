@@ -114,7 +114,7 @@ pub fn scan_bitlocker_with_callbacks(
     );
 
     let mut hits = match connector_options.kind {
-        ConnectorKind::Pcileech => {
+        ConnectorKind::Kvm | ConnectorKind::Pcileech => {
             scan_sequential(connector, start, chunk_count, request.chunk_size, callbacks)
         }
         ConnectorKind::Rawmem => scan_parallel(

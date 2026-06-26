@@ -140,6 +140,7 @@ pub struct BitlockerArgs {
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
 pub enum ConnectorKind {
     Pcileech,
+    Kvm,
     Rawmem,
 }
 

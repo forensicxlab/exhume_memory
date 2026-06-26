@@ -19,6 +19,8 @@ pub struct ConnectorOptions {
 #[derive(Clone)]
 pub enum Connector {
     Pcileech(memflow_pcileech::PciLeech),
+    #[cfg(target_os = "linux")]
+    Kvm(memflow_kvm::KVMConnector<'static>),
     Rawmem(memflow_rawmem::MemRawRo<'static>),
 }
 
@@ -65,6 +67,27 @@ impl ConnectorOptions {
                 });
                 Ok(Connector::Pcileech(conn))
             }
+            ConnectorKind::Kvm => {
+                #[cfg(target_os = "linux")]
+                {
+                    let conn = memflow_kvm::create_connector(&connector_args)
+                        .map_err(|e| anyhow!("failed to create memflow-kvm connector: {e}"))?;
+                    // Safety: KVMConnector owns the mapped VM memory via its map data. The connector
+                    // is stored in the enum and dropped with it; no borrowed input data escapes.
+                    let conn_static = unsafe {
+                        std::mem::transmute::<
+                            memflow_kvm::KVMConnector<'_>,
+                            memflow_kvm::KVMConnector<'static>,
+                        >(conn)
+                    };
+                    Ok(Connector::Kvm(conn_static))
+                }
+
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err(anyhow!("memflow-kvm is only supported on Linux hosts"))
+                }
+            }
             ConnectorKind::Rawmem => {
                 let conn = memflow_rawmem::create_connector(&connector_args)
                     .map_err(|e| anyhow!("failed to create memflow-rawmem connector: {e}"))?;
@@ -91,7 +114,7 @@ pub fn resolve_physical_end(connector: Connector, requested_end: Option<u64>) ->
     }
 
     let metadata_last = connector.metadata().max_address.to_umem();
-    if matches!(connector, Connector::Rawmem(_)) || metadata_last > 0x100000000 {
+    if is_direct_mapped_connector(&connector) || metadata_last > 0x100000000 {
         return Ok(metadata_last.saturating_add(1));
     }
 
@@ -115,6 +138,8 @@ impl PhysicalMemory for Connector {
     ) -> memflow::error::Result<()> {
         match self {
             Connector::Pcileech(c) => c.phys_read_raw_iter(data),
+            #[cfg(target_os = "linux")]
+            Connector::Kvm(c) => c.phys_read_raw_iter(data),
             Connector::Rawmem(c) => c.phys_read_raw_iter(data),
         }
     }
@@ -125,6 +150,8 @@ impl PhysicalMemory for Connector {
     ) -> memflow::error::Result<()> {
         match self {
             Connector::Pcileech(c) => c.phys_write_raw_iter(data),
+            #[cfg(target_os = "linux")]
+            Connector::Kvm(c) => c.phys_write_raw_iter(data),
             Connector::Rawmem(c) => c.phys_write_raw_iter(data),
         }
     }
@@ -132,6 +159,8 @@ impl PhysicalMemory for Connector {
     fn metadata(&self) -> memflow::mem::phys_mem::PhysicalMemoryMetadata {
         match self {
             Connector::Pcileech(c) => c.metadata(),
+            #[cfg(target_os = "linux")]
+            Connector::Kvm(c) => c.metadata(),
             Connector::Rawmem(c) => c.metadata(),
         }
     }
@@ -139,7 +168,24 @@ impl PhysicalMemory for Connector {
     fn set_mem_map(&mut self, mem_map: &[memflow::mem::mem_map::PhysicalMemoryMapping]) {
         match self {
             Connector::Pcileech(c) => c.set_mem_map(mem_map),
+            #[cfg(target_os = "linux")]
+            Connector::Kvm(c) => c.set_mem_map(mem_map),
             Connector::Rawmem(c) => c.set_mem_map(mem_map),
         }
     }
+}
+
+fn is_direct_mapped_connector(connector: &Connector) -> bool {
+    if matches!(connector, Connector::Rawmem(_)) {
+        return true;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if matches!(connector, Connector::Kvm(_)) {
+            return true;
+        }
+    }
+
+    false
 }
