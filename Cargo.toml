@@ -27,4 +27,4 @@ libloading = "0.8"
 prettytable = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-memflow-kvm = { git = "https://github.com/memflow/memflow-kvm", branch = "main" }
+memflow-kvm = { git = "https://github.com/forensicxlab/memflow-kvm", branch = "main" }

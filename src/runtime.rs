@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 use std::collections::HashSet;
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
 use crate::cli::LogLevel;
