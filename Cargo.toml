@@ -2,17 +2,20 @@
 name = "exhume_memory"
 version = "0.1.0"
 edition = "2024"
+description = "Volatile memory forensics for exhume"
+license = "MIT"
+repository = "https://github.com/forensicxlab/exhume"
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
-memflow = { git = "https://github.com/forensicxlab/memflow", branch = "main" }
-memflow-rawmem = { git = "https://github.com/forensicxlab/memflow-rawmem", branch = "main" }
-memflow-win32 = { git = "https://github.com/forensicxlab/memflow-win32", branch = "main" }
-memflow-pcileech = { git = "https://github.com/memflow/memflow-pcileech", branch = "main" }
-memflow-linux = { git = "https://github.com/forensicxlab/memflow-linux", branch = "master", default-features = false }
+memflow = { version = "0.2.4", git = "https://github.com/forensicxlab/memflow", branch = "main" }
+memflow-rawmem = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-rawmem", branch = "main" }
+memflow-win32 = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-win32", branch = "main" }
+memflow-pcileech = { version = "0.2.0", git = "https://github.com/memflow/memflow-pcileech", branch = "main" }
+memflow-linux = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-linux", branch = "master"}
 
 hex = "0.4"
 rayon = "1.8"
