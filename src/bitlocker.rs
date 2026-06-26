@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 
 use anyhow::Result;
 use memflow::mem::phys_mem::PhysicalMemory;
 use memflow::prelude::v1::*;
-use rayon::prelude::*;
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use crate::cli::ConnectorKind;
@@ -15,6 +15,7 @@ const TAGS: &[&[u8]] = &[b"Fve ", b"CNGb", b"dFVE"];
 const SIGNATURES: &[&[u8]] = &[&[
     0x2c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x04, 0x80, 0x00, 0x00,
 ]];
+const KVM_MAX_PARALLEL_WORKERS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct BitlockerScanRequest {
@@ -118,7 +119,9 @@ pub fn scan_bitlocker_with_callbacks(
             scan_sequential(connector, start, chunk_count, request.chunk_size, callbacks)
         }
         ConnectorKind::Kvm | ConnectorKind::Rawmem => scan_parallel(
+            connector,
             connector_options,
+            connector_options.kind,
             start,
             chunk_count,
             request.chunk_size,
@@ -166,45 +169,111 @@ fn scan_sequential(
 }
 
 fn scan_parallel(
+    connector: Connector,
     connector_options: &ConnectorOptions,
+    connector_kind: ConnectorKind,
     start: u64,
     chunk_count: u64,
     chunk_size: usize,
     callbacks: &BitlockerScanCallbacks,
 ) -> Result<Vec<BitlockerHit>> {
-    let progress = AtomicU64::new(0);
-    let callbacks = callbacks.clone();
-    let per_chunk = (0..chunk_count)
-        .into_par_iter()
-        .map_init(
-            || connector_options.open().map_err(|e| e.to_string()),
-            |connector, i| {
-                let result = match connector.as_mut() {
-                    Ok(connector) => Ok(scan_chunk(
-                        connector,
-                        start + i * chunk_size as u64,
-                        chunk_size,
-                        &callbacks,
-                    )),
-                    Err(error) => Err(anyhow::anyhow!("{error}")),
-                };
+    let worker_count = parallel_worker_count(connector_kind, chunk_count);
+    let chunks_per_worker = chunk_count.div_ceil(worker_count as u64);
+    let progress = Arc::new(AtomicU64::new(0));
+    let mut handles: Vec<thread::JoinHandle<Result<Vec<BitlockerHit>>>> =
+        Vec::with_capacity(worker_count.saturating_sub(1));
 
-                let scanned = progress.fetch_add(1, Ordering::Relaxed) + 1;
-                maybe_emit_progress(&callbacks, scanned, chunk_count);
-                if scanned == 1 || scanned % 256 == 0 || scanned == chunk_count {
-                    log::info!("bitlocker scan progress: {scanned}/{chunk_count} chunks");
-                }
-                result
-            },
-        )
-        .collect::<Vec<_>>();
+    log::info!("bitlocker parallel scan workers={worker_count} connector={connector_kind:?}");
 
-    let mut hits = Vec::new();
-    for chunk_hits in per_chunk {
-        hits.extend(chunk_hits?);
+    for worker_index in 1..worker_count {
+        let worker_start = worker_index as u64 * chunks_per_worker;
+        let worker_end = (worker_start + chunks_per_worker).min(chunk_count);
+        if worker_start >= worker_end {
+            continue;
+        }
+
+        let connector_options = connector_options.clone();
+        let callbacks = callbacks.clone();
+        let progress = Arc::clone(&progress);
+        handles.push(thread::spawn(move || -> Result<Vec<BitlockerHit>> {
+            let mut connector = connector_options.open()?;
+            Ok(scan_chunk_range(
+                &mut connector,
+                start,
+                worker_start,
+                worker_end,
+                chunk_size,
+                chunk_count,
+                progress.as_ref(),
+                &callbacks,
+            ))
+        }));
+    }
+
+    let mut connector = connector;
+    let main_worker_end = chunks_per_worker.min(chunk_count);
+    let mut hits = scan_chunk_range(
+        &mut connector,
+        start,
+        0,
+        main_worker_end,
+        chunk_size,
+        chunk_count,
+        progress.as_ref(),
+        callbacks,
+    );
+
+    for handle in handles {
+        let chunk_hits = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("bitlocker scan worker panicked"))??;
+        hits.extend(chunk_hits);
     }
 
     Ok(hits)
+}
+
+fn parallel_worker_count(connector_kind: ConnectorKind, chunk_count: u64) -> usize {
+    let available = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .max(1);
+    let connector_limit = match connector_kind {
+        ConnectorKind::Kvm => KVM_MAX_PARALLEL_WORKERS,
+        ConnectorKind::Rawmem => available,
+        ConnectorKind::Pcileech => 1,
+    };
+    available
+        .min(connector_limit)
+        .min(chunk_count.try_into().unwrap_or(usize::MAX))
+        .max(1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_chunk_range(
+    connector: &mut Connector,
+    start: u64,
+    first_chunk: u64,
+    end_chunk: u64,
+    chunk_size: usize,
+    chunk_count: u64,
+    progress: &AtomicU64,
+    callbacks: &BitlockerScanCallbacks,
+) -> Vec<BitlockerHit> {
+    let mut hits = Vec::new();
+
+    for i in first_chunk..end_chunk {
+        let chunk_base = start + i * chunk_size as u64;
+        hits.extend(scan_chunk(connector, chunk_base, chunk_size, callbacks));
+
+        let scanned = progress.fetch_add(1, Ordering::Relaxed) + 1;
+        maybe_emit_progress(callbacks, scanned, chunk_count);
+        if scanned == 1 || scanned % 256 == 0 || scanned == chunk_count {
+            log::info!("bitlocker scan progress: {scanned}/{chunk_count} chunks");
+        }
+    }
+
+    hits
 }
 
 fn scan_chunk(
@@ -443,5 +512,12 @@ mod tests {
 
         let material = FveMaterial::from_bytes(&data);
         assert!(material.is_none(), "should reject all-zero keys");
+    }
+
+    #[test]
+    fn test_kvm_worker_count_is_bounded() {
+        let worker_count = parallel_worker_count(ConnectorKind::Kvm, u64::MAX);
+        assert!(worker_count <= KVM_MAX_PARALLEL_WORKERS);
+        assert_eq!(parallel_worker_count(ConnectorKind::Kvm, 1), 1);
     }
 }
