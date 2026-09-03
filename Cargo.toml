@@ -11,26 +11,14 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
-# I know...it's very ugly, but for now let's to like this.
-# DEV: keep every memflow crate on the adjacent forensicxlab framework checkout.
-memflow = { version = "0.2.4", path = "../../../memflow-framework/memflow/memflow" }
-# RELEASE AFTER PUSH:
-# memflow = { version = "0.2.4", git = "https://github.com/forensicxlab/memflow", rev = "<PINNED_COMMIT>" }
-memflow-rawmem = { version = "0.2.0", path = "../../../memflow-framework/memflow-rawmem" }
-# RELEASE AFTER PUSH:
-# memflow-rawmem = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-rawmem", rev = "<PINNED_COMMIT>" }
-memflow-win32 = { version = "0.2.0", path = "../../../memflow-framework/memflow-win32/memflow-win32" }
-# RELEASE AFTER PUSH:
-# memflow-win32 = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-win32", rev = "<PINNED_COMMIT>" }
-memflow-pcileech = { version = "0.2.0", path = "../../../memflow-framework/memflow-pcileech/memflow-pcileech" }
-# RELEASE AFTER PUSH:
-# memflow-pcileech = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-pcileech", rev = "<PINNED_COMMIT>" }
-memflow-linux = { version = "0.2.0", path = "../../../memflow-framework/memflow-linux/memflow-linux" }
-# RELEASE AFTER PUSH:
-# memflow-linux = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-linux", rev = "<PINNED_COMMIT>" }
-scanflow = { version = "0.2.1", path = "../../../memflow-framework/scanflow/scanflow" }
-# RELEASE AFTER PUSH:
-# scanflow = { version = "0.2.1", git = "https://github.com/forensicxlab/scanflow", rev = "<PINNED_COMMIT>" }
+# All connectors and scanners use the forensicxlab Git forks. Their manifests
+# must in turn use the same memflow Git source to preserve Rust trait identity.
+memflow = { version = "0.2.4", git = "https://github.com/forensicxlab/memflow", branch = "main" }
+memflow-rawmem = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-rawmem", branch = "main" }
+memflow-win32 = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-win32", branch = "main" }
+memflow-pcileech = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-pcileech", branch = "main" }
+memflow-linux = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-linux", branch = "master" }
+scanflow = { version = "0.2.1", git = "https://github.com/forensicxlab/scanflow", branch = "main" }
 
 hex = "0.4"
 rayon = "1.8"
@@ -42,6 +30,4 @@ libloading = "0.8"
 prettytable = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-memflow-kvm = { version = "0.2.1", path = "../../../memflow-framework/memflow-kvm/memflow-kvm" }
-# RELEASE AFTER PUSH:
-# memflow-kvm = { version = "0.2.1", git = "https://github.com/forensicxlab/memflow-kvm", rev = "<PINNED_COMMIT>" }
+memflow-kvm = { version = "0.2.1", git = "https://github.com/forensicxlab/memflow-kvm", branch = "main" }
