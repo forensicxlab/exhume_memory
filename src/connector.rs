@@ -1,12 +1,15 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use memflow::mem::phys_mem::{PhysicalMemory, PhysicalMemoryMetadata};
 use memflow::prelude::v1::*;
 use memflow_win32::prelude::v1::*;
 
 use crate::cli::{ConnectorKind, OsKind};
+use crate::source::{
+    ConnectorSourceDescriptor, MemorySourceIdentity, MemorySourceInspection, PhysicalMemoryRange,
+    classify_connector_descriptor, inspect_descriptor_image, validate_physical_ranges,
+};
 
 #[derive(Debug, Clone)]
 pub struct ConnectorOptions {
@@ -24,19 +27,57 @@ pub enum Connector {
     Rawmem(memflow_rawmem::MemRawRo<'static>),
 }
 
-#[derive(Clone)]
-struct CachedPcileechConnector {
-    descriptor: String,
-    connector: memflow_pcileech::PciLeech,
-}
-
-fn pcileech_cache() -> &'static Mutex<Option<CachedPcileechConnector>> {
-    static CACHE: OnceLock<Mutex<Option<CachedPcileechConnector>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
-}
-
 impl ConnectorOptions {
+    /// Parses the configured source without opening a connector.
+    pub fn source_descriptor(&self) -> Result<crate::source::MemoryConnectorDescriptor> {
+        classify_connector_descriptor(self.kind, &self.connector)
+    }
+
+    /// Validates the acquisition source without constructing an OS layer.
+    ///
+    /// File images are inspected directly. Live sources are opened only far
+    /// enough to retrieve their connector-level physical map.
+    pub fn inspect_source(&self) -> Result<MemorySourceInspection> {
+        let descriptor = self.source_descriptor()?;
+        match &descriptor.source {
+            ConnectorSourceDescriptor::MemoryImage { .. } => {
+                let mut inspection = inspect_descriptor_image(&descriptor)?;
+                if self.kind == ConnectorKind::Pcileech {
+                    let connector = self
+                        .open_unvalidated()
+                        .context("failed to open validated pcileech image source")?;
+                    inspection.readable_ranges = connector.readable_ranges()?;
+                }
+                Ok(inspection)
+            }
+            ConnectorSourceDescriptor::LiveDma => {
+                let connector = self.open_unvalidated()?;
+                let readable_ranges = connector.readable_ranges()?;
+                Ok(MemorySourceInspection {
+                    identity: MemorySourceIdentity::LiveDma,
+                    connector_kind: self.kind,
+                    descriptor: self.connector.clone(),
+                    file_size: None,
+                    readable_ranges,
+                })
+            }
+        }
+    }
+
     pub fn open(&self) -> Result<Connector> {
+        let descriptor = self.source_descriptor()?;
+        if matches!(
+            &descriptor.source,
+            ConnectorSourceDescriptor::MemoryImage { .. }
+        ) {
+            // Validate connector/format compatibility before a backend can
+            // silently identity-map a sparse image.
+            inspect_descriptor_image(&descriptor)?;
+        }
+        self.open_unvalidated()
+    }
+
+    fn open_unvalidated(&self) -> Result<Connector> {
         let connector_args = self
             .connector
             .parse()
@@ -44,27 +85,8 @@ impl ConnectorOptions {
 
         match self.kind {
             ConnectorKind::Pcileech => {
-                let mut cache = pcileech_cache()
-                    .lock()
-                    .map_err(|_| anyhow!("failed to acquire pcileech connector cache lock"))?;
-
-                if let Some(cached) = cache.as_ref() {
-                    if cached.descriptor != self.connector {
-                        return Err(anyhow!(
-                            "pcileech connector already initialized for '{}' and cannot be changed without restarting the process",
-                            cached.descriptor
-                        ));
-                    }
-
-                    return Ok(Connector::Pcileech(cached.connector.clone()));
-                }
-
                 let conn = memflow_pcileech::create_connector(&connector_args)
                     .map_err(|e| anyhow!("failed to create memflow-pcileech connector: {e}"))?;
-                *cache = Some(CachedPcileechConnector {
-                    descriptor: self.connector.clone(),
-                    connector: conn.clone(),
-                });
                 Ok(Connector::Pcileech(conn))
             }
             ConnectorKind::Kvm => {
@@ -106,6 +128,46 @@ impl ConnectorOptions {
     pub fn metadata(&self) -> Result<PhysicalMemoryMetadata> {
         Ok(self.open()?.metadata())
     }
+}
+
+impl Connector {
+    /// Returns explicit readable physical ranges as half-open intervals.
+    pub fn readable_ranges(&self) -> Result<Vec<PhysicalMemoryRange>> {
+        let ranges = match self {
+            Connector::Pcileech(connector) => connector
+                .physical_memory_ranges()
+                .map_err(|err| anyhow!("failed to query pcileech physical ranges: {err}"))?
+                .into_iter()
+                .map(|range| PhysicalMemoryRange {
+                    start: range.start,
+                    end: range.end,
+                    source_offset: Some(range.source_offset),
+                })
+                .collect::<Vec<_>>(),
+            Connector::Rawmem(connector) => contiguous_metadata_range(connector.metadata())?,
+            #[cfg(target_os = "linux")]
+            Connector::Kvm(_) => anyhow::bail!(
+                "memflow-kvm does not expose its individual readable memory slots through the connector API"
+            ),
+        };
+
+        validate_physical_ranges(&ranges).context("connector returned an invalid physical map")?;
+        Ok(ranges)
+    }
+}
+
+fn contiguous_metadata_range(metadata: PhysicalMemoryMetadata) -> Result<Vec<PhysicalMemoryRange>> {
+    let end = metadata
+        .max_address
+        .to_umem()
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("connector maximum physical address overflows"))?;
+    let size = u64::try_from(metadata.real_size)
+        .map_err(|_| anyhow!("connector real size does not fit u64"))?;
+    let start = end.checked_sub(size).ok_or_else(|| {
+        anyhow!("connector real size exceeds its reported physical address envelope")
+    })?;
+    Ok(vec![PhysicalMemoryRange::from_len(start, size, None)?])
 }
 
 pub fn resolve_physical_end(connector: Connector, requested_end: Option<u64>) -> Result<u64> {

@@ -5,6 +5,7 @@ pub mod commands;
 pub mod connector;
 pub mod output;
 pub mod runtime;
+pub mod source;
 
 pub use api::{
     EnvarRecord, EnvarsReport, EnvarsRequest, MemdumpCallbacks, MemdumpReport, MemdumpRequest,
@@ -20,6 +21,11 @@ pub use cli::{
     OsKind, PsListArgs, TriageArgs,
 };
 pub use connector::{Connector, ConnectorOptions};
+pub use source::{
+    ConnectorSourceDescriptor, MemoryConnectorDescriptor, MemoryImageFormat, MemorySourceIdentity,
+    MemorySourceInspection, PhysicalMemoryRange, classify_connector_descriptor,
+    detect_memory_image_format, inspect_memory_image, validate_physical_ranges,
+};
 
 use anyhow::Result;
 

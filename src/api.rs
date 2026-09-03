@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::bitlocker::{BitlockerScanReport, BitlockerScanRequest, scan_bitlocker};
 use crate::cli::OsKind;
 use crate::connector::{Connector, ConnectorOptions};
+use crate::source::MemorySourceInspection;
 
 /// Dispatches to Win32Kernel or LinuxKernel based on `$os_kind`, binding the result to `$os`.
 /// The `$body` block must evaluate to `Result<_>` and is type-checked independently per arm.
@@ -160,6 +161,12 @@ impl MemoryService {
 
     pub fn open_connector(&self) -> Result<Connector> {
         self.connector_options.open()
+    }
+
+    /// Inspects and validates the configured acquisition source without
+    /// constructing a Windows or Linux OS layer.
+    pub fn inspect_source(&self) -> Result<MemorySourceInspection> {
+        self.connector_options.inspect_source()
     }
 
     pub fn probe(&self, request: &PsListRequest) -> Result<ProbeReport> {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use crate::connector::ConnectorOptions;
 
@@ -137,7 +138,8 @@ pub struct BitlockerArgs {
     pub chunk_size: usize,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConnectorKind {
     Pcileech,
     Kvm,
