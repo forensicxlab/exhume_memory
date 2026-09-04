@@ -1,6 +1,6 @@
 [package]
 name = "exhume_memory"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Volatile memory forensics for exhume"
 publish = false
@@ -18,7 +18,7 @@ log = "0.4"
 memflow = { version = "0.2.4", git = "https://github.com/forensicxlab/memflow", branch = "main" }
 memflow-rawmem = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-rawmem", branch = "main" }
 memflow-win32 = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-win32", branch = "main" }
-memflow-pcileech = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-pcileech", branch = "main" }
+memflow-pcileech = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-pcileech", rev = "1756dfd24574190ac13d0c70ac2e2ee1d16c9496" }
 memflow-linux = { version = "0.2.0", git = "https://github.com/forensicxlab/memflow-linux", branch = "master" }
 scanflow = { version = "0.2.1", git = "https://github.com/forensicxlab/scanflow", branch = "main" }
 
