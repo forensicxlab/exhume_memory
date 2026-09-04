@@ -1,6 +1,6 @@
 [package]
 name = "exhume_memory"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Volatile memory forensics for exhume"
 publish = false

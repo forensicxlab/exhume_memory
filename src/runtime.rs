@@ -1,7 +1,7 @@
-#[cfg(target_os = "macos")]
 use std::collections::HashSet;
-#[cfg(target_os = "macos")]
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::cli::LogLevel;
 
@@ -21,71 +21,105 @@ pub fn init_logging(level: LogLevel) {
     builder.init();
 }
 
+/// Locate and preload the optional LeechCore DMA runtime shipped beside an
+/// application. The setup is process-wide and therefore runs at most once.
+///
+/// `exhume_memory` links the LeechCore core statically. Only the platform DMA
+/// driver libraries need to be discovered at runtime.
 pub fn configure_runtime_paths() {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(runtime_dir) = find_macos_runtime_dir() {
-            ensure_macos_driver_aliases(&runtime_dir);
-            set_env_path("DYLD_LIBRARY_PATH", &runtime_dir);
-            set_env_path("DYLD_FALLBACK_LIBRARY_PATH", &runtime_dir);
-            preload_macos_runtime_libraries(&runtime_dir);
-            log::info!("using LeechCore runtime dir: {}", runtime_dir.display());
-        } else {
+    static CONFIGURED_RUNTIME: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    CONFIGURED_RUNTIME.get_or_init(|| {
+        let Some(runtime_dir) = find_runtime_dir() else {
             log::warn!(
-                "could not auto-locate LeechCore runtime dir. expected binaries/bin-macos/LeechCore/runtime, binaries/bin-macos/PCILeech/runtime, or lc-runtime containing leechcore_ft601_driver_macos.dylib"
+                "could not auto-locate the LeechCore runtime directory; expected one of [{}] in leechcore-runtime or set LEECHCORE_RUNTIME_DIR",
+                runtime_driver_names().join(", ")
+            );
+            return None;
+        };
+
+        configure_loader_search_path(&runtime_dir);
+        let preload = preload_runtime_libraries(&runtime_dir);
+        if !preload.driver_loaded {
+            log::warn!(
+                "found LeechCore runtime directory {}, but no DMA driver could be preloaded ({} supporting libraries loaded)",
+                runtime_dir.display(),
+                preload.libraries.len()
+            );
+        } else {
+            log::info!(
+                "using LeechCore runtime directory {} ({} libraries preloaded)",
+                runtime_dir.display(),
+                preload.libraries.len()
             );
         }
-    }
+
+        Some(runtime_dir)
+    });
 }
 
-#[cfg(target_os = "macos")]
-const MACOS_RUNTIME_RELATIVE_DIRS: &[&str] = &[
+const RUNTIME_RELATIVE_DIRS: &[&str] = &[
+    "leechcore-runtime",
+    "runtime/leechcore",
+    "binaries/LeechCore/runtime",
+    // Legacy Thanatology development layout.
     "binaries/bin-macos/LeechCore/runtime",
     "src-tauri/binaries/bin-macos/LeechCore/runtime",
+    "Resources/leechcore-runtime",
     "Resources/binaries/bin-macos/LeechCore/runtime",
-    "binaries/bin-macos/PCILeech/runtime",
-    "src-tauri/binaries/bin-macos/PCILeech/runtime",
-    "Resources/binaries/bin-macos/PCILeech/runtime",
-    "lc-runtime",
-    "src-tauri/lc-runtime",
-    "Resources/lc-runtime",
     "",
 ];
 
-#[cfg(target_os = "macos")]
-fn find_macos_runtime_dir() -> Option<PathBuf> {
+fn find_runtime_dir() -> Option<PathBuf> {
+    let override_dir = std::env::var_os("LEECHCORE_RUNTIME_DIR").map(PathBuf::from);
+    // Current-directory discovery is convenient for development, but a
+    // release build must not load native libraries from an investigator's
+    // working directory.
+    let cwd = if cfg!(debug_assertions) {
+        std::env::current_dir().ok()
+    } else {
+        None
+    };
+    let executable = std::env::current_exe().ok();
+
+    find_runtime_dir_from(override_dir, cwd.as_deref(), executable.as_deref())
+}
+
+fn find_runtime_dir_from(
+    override_dir: Option<PathBuf>,
+    cwd: Option<&Path>,
+    executable: Option<&Path>,
+) -> Option<PathBuf> {
     let mut candidates = Vec::<PathBuf>::new();
 
-    if let Ok(dir) = std::env::var("LEECHCORE_RUNTIME_DIR") {
-        candidates.push(PathBuf::from(dir));
+    if let Some(dir) = override_dir {
+        candidates.push(dir);
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        extend_macos_runtime_candidates(&mut candidates, &cwd);
+    if let Some(dir) = cwd {
+        extend_runtime_candidates(&mut candidates, dir);
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            extend_macos_runtime_candidates(&mut candidates, exe_dir);
-            if let Some(contents_dir) = exe_dir.parent() {
-                extend_macos_runtime_candidates(&mut candidates, contents_dir);
-                extend_macos_runtime_candidates(&mut candidates, &contents_dir.join("Resources"));
-            }
-        }
+    if let Some(executable) = executable
+        && let Some(executable_dir) = executable.parent()
+    {
+        extend_runtime_candidates(&mut candidates, executable_dir);
+        extend_linux_resource_candidates(&mut candidates, executable_dir, executable);
     }
 
     let mut seen = HashSet::new();
-    candidates.into_iter().find(|dir| {
-        seen.insert(dir.clone())
-            && (dir.join("leechcore_ft601_driver_macos.dylib").is_file()
-                || dir.join("leechcore_driver.dylib").is_file())
+    candidates.into_iter().find_map(|candidate| {
+        if !seen.insert(candidate.clone()) || !runtime_dir_is_valid(&candidate) {
+            return None;
+        }
+
+        Some(std::fs::canonicalize(&candidate).unwrap_or(candidate))
     })
 }
 
-#[cfg(target_os = "macos")]
-fn extend_macos_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
-    for ancestor in base.ancestors().take(6) {
-        for relative_dir in MACOS_RUNTIME_RELATIVE_DIRS {
+fn extend_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    for ancestor in base.ancestors().take(8) {
+        for relative_dir in RUNTIME_RELATIVE_DIRS {
             if relative_dir.is_empty() {
                 candidates.push(ancestor.to_path_buf());
             } else {
@@ -95,90 +129,245 @@ fn extend_macos_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
     }
 }
 
+fn extend_linux_resource_candidates(
+    candidates: &mut Vec<PathBuf>,
+    executable_dir: &Path,
+    executable: &Path,
+) {
+    #[cfg(target_os = "linux")]
+    if let Some(executable_name) = executable.file_name() {
+        // Tauri places resources in ../lib/<executable-name> for development,
+        // AppImage, deb and rpm layouts.
+        candidates.push(
+            executable_dir
+                .join("../lib")
+                .join(executable_name)
+                .join("leechcore-runtime"),
+        );
+        candidates.push(
+            Path::new("/usr/lib")
+                .join(executable_name)
+                .join("leechcore-runtime"),
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (candidates, executable_dir, executable);
+    }
+}
+
+fn runtime_dir_is_valid(dir: &Path) -> bool {
+    runtime_driver_names()
+        .iter()
+        .any(|name| dir.join(name).is_file())
+}
+
 #[cfg(target_os = "macos")]
-fn set_env_path(key: &str, path: &Path) {
-    let value = path.to_string_lossy().to_string();
-    // Rust 2024 marks env mutation as unsafe because it is process-global.
+fn runtime_driver_names() -> &'static [&'static str] {
+    &["leechcore_ft601_driver_macos.dylib"]
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_driver_names() -> &'static [&'static str] {
+    &["leechcore_driver.so", "leechcore_ft601_driver_linux.so"]
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_driver_names() -> &'static [&'static str] {
+    &["leechcore_driver.dll", "FTD3XXWU.dll", "FTD3XX.dll"]
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn runtime_driver_names() -> &'static [&'static str] {
+    &[]
+}
+
+fn configure_loader_search_path(runtime_dir: &Path) {
+    #[cfg(target_os = "macos")]
+    for key in ["DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"] {
+        prepend_env_path(key, runtime_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    prepend_env_path("LD_LIBRARY_PATH", runtime_dir);
+
+    #[cfg(target_os = "windows")]
+    prepend_env_path("PATH", runtime_dir);
+}
+
+fn prepend_env_path(key: &str, path: &Path) {
+    let Some(value) = prepended_search_path(path, std::env::var_os(key).as_deref()) else {
+        log::warn!("failed to add {} to {}", path.display(), key);
+        return;
+    };
+
+    // Rust 2024 marks environment mutation as unsafe because it is
+    // process-global. configure_runtime_paths serializes this one-time setup.
     unsafe {
         std::env::set_var(key, value);
     }
 }
 
-#[cfg(target_os = "macos")]
-fn ensure_macos_driver_aliases(runtime_dir: &Path) {
-    use std::os::unix::fs::symlink;
-
-    let generic_driver = runtime_dir.join("leechcore_driver.dylib");
-    let legacy_driver = runtime_dir.join("leechcore.dylib");
-
-    if generic_driver.exists() || !legacy_driver.exists() {
-        return;
+fn prepended_search_path(path: &Path, current: Option<&OsStr>) -> Option<OsString> {
+    let mut paths = vec![path.to_path_buf()];
+    if let Some(current) = current {
+        paths.extend(std::env::split_paths(current));
     }
 
-    match symlink(&legacy_driver, &generic_driver) {
-        Ok(()) => {
-            log::info!(
-                "created compatibility symlink: {} -> {}",
-                generic_driver.display(),
-                legacy_driver.display()
-            );
+    let mut seen = HashSet::new();
+    paths.retain(|entry| seen.insert(entry.clone()));
+    std::env::join_paths(paths).ok()
+}
+
+struct PreloadedRuntime {
+    libraries: Vec<libloading::Library>,
+    driver_loaded: bool,
+}
+
+fn preload_runtime_libraries(runtime_dir: &Path) -> &'static PreloadedRuntime {
+    static PRELOADED_RUNTIME: OnceLock<PreloadedRuntime> = OnceLock::new();
+
+    PRELOADED_RUNTIME.get_or_init(|| {
+        let mut libraries = Vec::new();
+        let mut driver_loaded = false;
+
+        for name in preload_library_names() {
+            let path = runtime_dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+
+            match unsafe { libloading::Library::new(&path) } {
+                Ok(library) => {
+                    log::debug!("preloaded {}", path.display());
+                    driver_loaded |= runtime_driver_names().contains(name);
+                    libraries.push(library);
+                }
+                Err(err) => {
+                    log::warn!("failed to preload {}: {}", path.display(), err);
+                }
+            }
         }
-        Err(err) => {
-            log::warn!(
-                "failed to create compatibility symlink {} -> {}: {}",
-                generic_driver.display(),
-                legacy_driver.display(),
-                err
-            );
+
+        PreloadedRuntime {
+            libraries,
+            driver_loaded,
         }
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn preload_macos_runtime_libraries(runtime_dir: &Path) {
-    use std::sync::OnceLock;
+fn preload_library_names() -> &'static [&'static str] {
+    &["libftd3xx.dylib", "leechcore_ft601_driver_macos.dylib"]
+}
 
-    static PRELOAD_DONE: OnceLock<()> = OnceLock::new();
+#[cfg(target_os = "linux")]
+fn preload_library_names() -> &'static [&'static str] {
+    &["leechcore_driver.so", "leechcore_ft601_driver_linux.so"]
+}
 
-    if PRELOAD_DONE.get().is_some() {
-        return;
-    }
+#[cfg(target_os = "windows")]
+fn preload_library_names() -> &'static [&'static str] {
+    &[
+        "vcruntime140.dll",
+        "leechcore_driver.dll",
+        "FTD3XXWU.dll",
+        "FTD3XX.dll",
+    ]
+}
 
-    let candidates = [
-        "libftd3xx.dylib",
-        "libMSCompression.dylib",
-        "leechcore.dylib",
-        "leechcore_driver.dylib",
-        "leechcore_ft601_driver_macos.dylib",
-    ];
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn preload_library_names() -> &'static [&'static str] {
+    &[]
+}
 
-    let mut loaded = 0usize;
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    for name in candidates {
-        let path = runtime_dir.join(name);
-        if !path.is_file() {
-            continue;
+    use super::*;
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let nonce = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "exhume-memory-runtime-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create runtime test directory");
+            Self(path)
         }
 
-        match unsafe { libloading::Library::new(&path) } {
-            Ok(library) => {
-                // Keep the image loaded for the process lifetime.
-                std::mem::forget(library);
-                loaded += 1;
-                log::debug!("preloaded {}", path.display());
-            }
-            Err(err) => {
-                log::warn!("failed to preload {}: {}", path.display(), err);
-            }
+        fn path(&self) -> &Path {
+            &self.0
         }
     }
 
-    let _ = PRELOAD_DONE.set(());
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
-    if loaded == 0 {
-        log::warn!(
-            "no LeechCore runtime libraries were preloaded from {}",
-            runtime_dir.display()
-        );
+    fn add_runtime_marker(dir: &Path) {
+        fs::create_dir_all(dir).expect("create marker directory");
+        fs::write(dir.join(runtime_driver_names()[0]), b"fixture").expect("write runtime marker");
+    }
+
+    #[test]
+    fn explicit_runtime_directory_takes_priority() {
+        let fixture = TestDir::new("override");
+        let override_dir = fixture.path().join("explicit");
+        let discovered_dir = fixture.path().join("leechcore-runtime");
+        add_runtime_marker(&override_dir);
+        add_runtime_marker(&discovered_dir);
+
+        let selected =
+            find_runtime_dir_from(Some(override_dir.clone()), Some(fixture.path()), None)
+                .expect("runtime directory");
+
+        assert_eq!(selected, fs::canonicalize(override_dir).unwrap());
+    }
+
+    #[test]
+    fn discovers_runtime_beside_the_executable() {
+        let fixture = TestDir::new("executable");
+        let executable_dir = fixture.path().join("bin");
+        let runtime_dir = executable_dir.join("leechcore-runtime");
+        add_runtime_marker(&runtime_dir);
+
+        let selected = find_runtime_dir_from(None, None, Some(&executable_dir.join("thanatology")))
+            .expect("runtime directory");
+
+        assert_eq!(selected, fs::canonicalize(runtime_dir).unwrap());
+    }
+
+    #[test]
+    fn discovers_runtime_in_a_macos_style_resources_directory() {
+        let fixture = TestDir::new("resources");
+        let contents = fixture.path().join("Thanatology.app/Contents");
+        let runtime_dir = contents.join("Resources/leechcore-runtime");
+        add_runtime_marker(&runtime_dir);
+
+        let selected = find_runtime_dir_from(None, None, Some(&contents.join("MacOS/thanatology")))
+            .expect("runtime directory");
+
+        assert_eq!(selected, fs::canonicalize(runtime_dir).unwrap());
+    }
+
+    #[test]
+    fn prepending_search_path_preserves_entries_without_duplicates() {
+        let runtime = Path::new("/runtime");
+        let current = std::env::join_paths([Path::new("/existing"), runtime]).unwrap();
+        let updated = prepended_search_path(runtime, Some(&current)).unwrap();
+        let entries = std::env::split_paths(&updated).collect::<Vec<_>>();
+
+        assert_eq!(entries, vec![runtime, Path::new("/existing")]);
     }
 }
