@@ -2,6 +2,7 @@
 name = "exhume_memory"
 version = "0.1.4"
 edition = "2024"
+rust-version = "1.92"
 description = "Volatile memory forensics for exhume"
 publish = false
 license = "GPL-3.0-only"
