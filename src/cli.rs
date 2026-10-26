@@ -12,7 +12,7 @@ pub enum OsKind {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "exhume_memory")]
+#[command(name = "exhume_memory", version)]
 #[command(
     about = "Exhume volatile memory through reusable forensic workflows.",
     subcommand_required = true,
